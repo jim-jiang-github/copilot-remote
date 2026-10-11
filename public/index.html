@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light">
+  <title>Copilot Remote</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" type="module"></script>
+</head>
+<body>
+  <div id="login" class="login">
+    <form id="login-form" class="login-card">
+      <div class="brand-mark" aria-hidden="true">⌘</div>
+      <h1>Copilot Remote</h1>
+      <p>连接你的 GitHub Copilot PC App</p>
+      <p id="account-info">使用本地控制面板账号，不是 GitHub 账号。</p>
+      <label for="username">账号</label>
+      <input id="username" type="text" autocomplete="username" required maxlength="64" placeholder="本地账号">
+      <label for="password">密码</label>
+      <input id="password" type="password" autocomplete="current-password" required maxlength="256" placeholder="本地账号密码">
+      <button class="primary" type="submit">连接桌面</button>
+      <p id="login-error" role="alert"></p>
+      <small>不收集 GitHub 密码。仅在可信私有网络中使用。</small>
+    </form>
+  </div>
+  <div id="shell" class="shell" hidden>
+    <aside id="sidebar" class="sidebar" aria-label="会话侧边栏">
+      <div class="sidebar-top"><span class="panel-symbol" aria-hidden="true">◫</span><span class="sidebar-tools"><button id="toggle-search" class="icon" aria-label="搜索会话">⌕</button><button class="icon" disabled aria-label="历史后退不可用">‹</button><button class="icon" disabled aria-label="历史前进不可用">›</button></span><button id="close-sidebar" class="icon mobile-only" aria-label="关闭会话列表">×</button></div>
+      <div class="app-navigation">
+        <button id="create-session" class="nav-item" aria-label="新建会话"><span aria-hidden="true">＋</span>New</button>
+        <button class="nav-item" disabled title="此面板不提供 Pull requests"><span aria-hidden="true">⑂</span>Pull requests</button>
+        <button class="nav-item" disabled title="此面板不提供 Issues"><span aria-hidden="true">⊙</span>Issues</button>
+        <button class="nav-item" disabled title="此面板不提供 Automations"><span aria-hidden="true">▦</span>Automations</button>
+        <button class="nav-item" disabled title="此面板不提供 Customize"><span aria-hidden="true">▧</span>Customize</button>
+      </div>
+      <label id="search-container" class="search" hidden><span aria-hidden="true">⌕</span><input id="search" type="search" placeholder="搜索会话" aria-label="搜索会话"></label>
+      <div class="section-heading">Projects <span><button id="refresh" class="icon" aria-label="刷新会话">↻</button><button id="project-create" class="icon" aria-label="新建会话">+</button></span></div>
+      <nav id="sessions" aria-label="Copilot 会话"></nav>
+      <div class="sidebar-footer"><span class="avatar">PC</span><div><strong>Copilot PC App</strong><small id="connection">未连接</small></div><button id="logout" class="icon" aria-label="退出登录">⇥</button></div>
+    </aside>
+    <button id="backdrop" class="backdrop" hidden aria-label="关闭会话列表"></button>
+    <main class="chat">
+      <header class="chat-header"><button id="open-sidebar" class="icon mobile-only" aria-label="打开会话列表">☰</button><div><strong id="title">选择一个会话</strong></div><small id="subtitle">网页选中不会切换 PC 页面</small></header>
+      <div class="notice">后台助手中转 · 选择仅改变网页目标，不切换电脑页面。中转消耗模型额度，通常需要数十秒。</div>
+      <div id="status" class="status" role="status" aria-live="polite">正在读取桌面…</div>
+      <div class="history-controls"><button id="older-history" type="button" hidden>加载更早记录</button><span id="history-status" role="status">选中后读取本机历史；不含未落盘流式文本。</span><button id="reload-history" type="button" hidden>重新加载历史</button></div>
+      <div id="conversation" class="conversation"></div>
+      <form id="composer" class="composer">
+        <label class="sr-only" for="message">发送到选中的 Copilot 会话</label>
+        <textarea id="message" rows="5" maxlength="8000" placeholder="先选择一个会话…" disabled></textarea>
+        <div class="composer-bottom"><span class="composer-mode">后台中转</span><span id="target-label">尚未选择</span><span id="counter">0 / 8000</span><button id="send" class="send" type="submit" aria-label="发送消息" disabled>↑</button></div>
+      </form>
+      <footer class="chat-footer">App 接受投递可能仍需排队 · 不代表目标已处理或任务执行成功</footer>
+    </main>
+  </div>
+  <dialog id="create-dialog">
+    <form id="create-form">
+      <h2>新建 App 会话</h2>
+      <p>后台调用真实 App 创建工具，不启动任务或切换电脑页面。</p>
+      <label for="new-name">会话名称</label>
+      <input id="new-name" required maxlength="80" autocomplete="off">
+      <label for="new-project">所属项目</label>
+      <select id="new-project"><option value="">独立聊天</option></select>
+      <p id="create-error" role="alert"></p>
+      <div class="dialog-actions"><button id="cancel-create" type="button">取消</button><button class="primary" type="submit">创建</button></div>
+    </form>
+  </dialog>
+</body>
+</html>

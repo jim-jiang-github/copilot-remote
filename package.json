@@ -1,0 +1,18 @@
+{
+  "name": "copilot-remote",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Authenticated mobile controller for existing Copilot desktop conversations",
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test test/*.test.mjs",
+    "test:desktop": "node test/desktop-e2e.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.64.0"
+  }
+}
