@@ -22,14 +22,16 @@ dialog{width:min(420px,calc(100vw - 32px));border:1px solid var(--border);border
 .section-heading{padding:0 3px;height:30px;font-size:12px;font-weight:400;color:#52667e}
 .section-heading .icon{width:26px;height:26px;font-size:18px}
 .tree-group{margin:0}
-.tree-group>summary{padding:6px 4px;font-size:13px;font-weight:400;color:var(--fg)}
+.tree-group>summary{padding:6px 4px;font-size:13px;font-weight:400;color:var(--fg);list-style:none}
+.tree-group>summary::-webkit-details-marker{display:none}
 .tree-folder-icon,.tree-chat-icon{display:inline-block;width:14px;height:11px;border:1px solid #647384;border-radius:2px;margin-right:8px;vertical-align:-1px;position:relative}
 .tree-folder-icon:before{content:"";position:absolute;top:-4px;left:-1px;width:7px;height:4px;border:1px solid #647384;border-bottom:0;border-radius:2px 2px 0 0;background:var(--sidebar)}
 .tree-chat-icon{height:13px;border-radius:7px;vertical-align:-2px}
 .tree-chat-icon:after{content:"";position:absolute;bottom:-2px;left:1px;width:4px;height:4px;border-left:1px solid #647384;transform:skew(-25deg);background:var(--sidebar)}
 .session{height:32px;margin:0;padding:6px 9px;gap:9px;align-items:center}
 .session.active{background:var(--hover);box-shadow:none}
-.session-icon{width:10px;font-size:19px;line-height:1;color:#c6ced7}
+.session-icon{width:12px;height:14px;font-size:14px;line-height:1;display:inline-flex;align-items:center;justify-content:center;color:transparent;flex:none}
+.session-icon.busy{color:var(--accent);font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Segoe UI Symbol",monospace;font-weight:600}
 .session-copy{flex:1}
 .session strong{font-weight:400;font-size:13px}
 .tree-children{margin-left:19px;padding-left:0;border-left:0}
@@ -41,9 +43,101 @@ dialog{width:min(420px,calc(100vw - 32px));border:1px solid var(--border);border
 .chat-header{min-height:44px;height:44px;padding:0 12px;border:0}
 .chat-header strong{font-size:13px;font-weight:400}
 .chat-header>small{font-size:10px;color:#8492a3}
-.notice,.status{width:min(748px,calc(100% - 48px));margin:0 auto;padding:5px 0;background:transparent;border:0;font-size:11px;min-height:0}
-.notice{color:#8b97a5}
-.status.error{background:transparent;color:var(--error)}
+.notice, .history-controls { display: none !important; }
+.status:not(.error) { display: none !important; }
+.status.error {
+  width: min(748px, calc(100% - 48px));
+  margin: 4px auto;
+  padding: 6px 12px;
+  background: color-mix(in srgb, var(--error) 10%, var(--bg));
+  border: 1px solid color-mix(in srgb, var(--error) 30%, transparent);
+  border-radius: 6px;
+  color: var(--error);
+  font-size: 11px;
+}
+.image-previews {
+  display: flex;
+  gap: 8px;
+  padding-bottom: 8px;
+  overflow-x: auto;
+}
+.image-preview-item {
+  position: relative;
+  width: 56px;
+  height: 56px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  overflow: hidden;
+  flex: none;
+  background: var(--hover);
+}
+.image-preview-item img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.image-preview-item .remove-btn {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.65);
+  color: #fff;
+  border: 0;
+  padding: 0;
+  font-size: 11px;
+  line-height: 16px;
+  text-align: center;
+  cursor: pointer;
+}
+.icon-attach {
+  border: 0;
+  background: transparent;
+  font-size: 16px;
+  line-height: 1;
+  padding: 4px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+  color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.icon-attach:hover:not(:disabled) {
+  background: var(--hover);
+  color: var(--fg);
+}
+.message-attachment-gallery {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+.attachment-thumb {
+  max-width: 220px;
+  max-height: 180px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  object-fit: cover;
+  display: block;
+  cursor: pointer;
+}
+.attachment-thumb:hover {
+  opacity: 0.92;
+}
+.attachment-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--hover);
+  font-size: 11px;
+}
 .conversation{padding:16px max(24px,calc((100% - 748px)/2));font-size:14px;line-height:22px}
 .transcript-heading{font-size:11px;color:#8b97a5}
 .conversation>p{font-size:13px;color:var(--muted)}
@@ -55,22 +149,38 @@ dialog{width:min(420px,calc(100vw - 32px));border:1px solid var(--border);border
 .history-controls{width:min(748px,calc(100% - 32px));margin:0 auto;display:flex;align-items:center;gap:8px;font-size:10px;color:#8190a3;flex-wrap:wrap}
 .history-controls button{font-size:11px;background:transparent;border:1px solid var(--border);border-radius:5px;padding:3px 7px}
 .transcript-line.user{width:fit-content;max-width:85%;margin:12px 0 20px auto;border:0;padding:10px 12px;border-radius:12px;background:var(--bubble)}
-.composer{height:184px;margin:8px max(24px,calc((100% - 772px)/2)) 0;padding:12px;border-color:#8391a4;box-shadow:0 1px 3px #172b411a;border-radius:12px}
+.composer{min-height:160px;margin:8px max(24px,calc((100% - 772px)/2)) 0;padding:12px;border-color:#8391a4;box-shadow:0 1px 3px #172b411a;border-radius:12px;display:flex;flex-direction:column}
 .composer:focus-within{border-color:#62758f}
-.composer textarea{height:125px;min-height:0;max-height:125px;resize:none;font-size:14px;line-height:22px}
+.composer textarea{flex:1;height:100px;min-height:50px;max-height:160px;resize:none;font-size:14px;line-height:22px}
 .composer textarea::placeholder{color:#95a1b0}
 .composer-bottom{margin-top:5px;gap:12px;font-size:11px}
 .composer-mode{flex:none;color:#52667e}
 .send{width:26px;height:26px;border-radius:50%;font-size:21px;line-height:24px;background:#252b31;color:#fff}
 .chat-footer{height:max(8px,env(safe-area-inset-bottom));flex:none;padding:0;font-size:0;overflow:hidden;color:#8b97a5}
+.tool-card{display:flex;align-items:center;gap:8px;max-width:fit-content;min-width:180px;margin:6px 0;padding:6px 12px;background:var(--bg);border:1px solid var(--border);border-radius:8px;font-size:12px;color:var(--fg);line-height:1.4;box-shadow:0 1px 2px #0000000a}
+.tool-icon{font-size:14px;flex:none}
+.tool-title{flex:1;font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:480px}
+.tool-duration{font-size:11px;color:var(--muted);flex:none;margin-left:auto}
+.tool-duration.running{color:var(--accent);display:flex;align-items:center;gap:4px}
+.tool-duration.running::before{content:"";display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--accent);animation:tool-pulse 1.2s infinite ease-in-out}
+@keyframes tool-pulse{0%,100%{opacity:.3;transform:scale(.8)}50%{opacity:1;transform:scale(1.2)}}
+.tool-card.status-failed{border-color:color-mix(in srgb,var(--error) 40%,var(--border))}
+.tool-card.status-failed .tool-duration{color:var(--error)}
+.session-stats{display:flex;align-items:center;gap:8px;margin-left:auto;flex-wrap:nowrap}
+.stat-pill{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border:1px solid var(--border);border-radius:12px;background:var(--sidebar);font-size:11px;color:var(--muted);white-space:nowrap}
+.stat-pill.busy{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 40%,var(--border));background:color-mix(in srgb,var(--accent) 8%,var(--bg));font-weight:500}
+.stat-pill.changes{font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;font-size:10px}
 @media(max-width:700px){
   .sidebar{width:min(274px,85vw);padding-top:env(safe-area-inset-top)}
   .chat-header{height:48px;min-height:48px;padding:0 12px}
   .chat-header>small{display:none}
+  .session-stats{gap:4px}
+  .stat-pill{padding:1px 5px;font-size:10px}
+  .tool-title{max-width:200px}
   .notice,.status{width:calc(100% - 32px);font-size:10px}
   .conversation{padding:12px 16px}
-  .composer{height:170px;margin:8px 12px 0}
-  .composer textarea{height:111px;max-height:111px;font-size:16px}
+  .composer{min-height:140px;margin:8px 12px 0}
+  .composer textarea{height:80px;max-height:120px;font-size:16px}
   .composer-bottom{gap:8px;font-size:10px}
   .chat-footer{padding:0}
 }

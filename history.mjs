@@ -1,4 +1,6 @@
-import { open, lstat } from 'node:fs/promises';
+import { open, lstat, readdir } from 'node:fs/promises';
+import { openSync, readSync, closeSync, statSync } from 'node:fs';
+import { execFile } from 'node:child_process';
 import path from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import { AppError } from './server.mjs';
@@ -37,18 +39,192 @@ function visibleMessage(event) {
   if (data.attachments !== undefined && !Array.isArray(data.attachments)) throw invalid('未知附件结构。');
   const attachments = (data.attachments ?? []).map(item => {
     if (!item || typeof item !== 'object') throw invalid('未知附件结构。');
-    // Deliberately exclude paths, URLs, blobs and document contents.
+    // Deliberately exclude arbitrary paths, URLs, blobs and document contents.
     const name = item.displayName ?? item.display_name ?? item.name;
     if (typeof name !== 'string') throw invalid('附件缺少可识别的安全名称。');
-    return { name: path.basename(name.replace(/\\/g, '/')).slice(0, 200) };
+    const safeName = path.basename(name.replace(/\\/g, '/')).slice(0, 200);
+    let rawFilename = safeName;
+    if (typeof item.path === 'string') {
+      const match = item.path.match(/[\\/]\.copilot[\\/](?:workspaces[\\/][^\\/]+[\\/])?attachments[\\/]([0-9a-zA-Z._-]+)$/i);
+      if (match) rawFilename = match[1];
+    }
+    return { name: safeName, filename: rawFilename };
   });
-  if (!data.content.trim() && !attachments.length) return null;
+
+  // Also extract any user uploaded image attachments embedded in the prompt format
+  let displayContent = data.content;
+  if (event.type === 'user.message' && typeof data.content === 'string') {
+    const embedRegex = /\[用户上传了 \d+ 张图片附件\]:\s*([\s\S]*?)(?:\n\n|$)/;
+    const match = data.content.match(embedRegex);
+    if (match) {
+      const fileLines = match[1].split('\n');
+      for (const line of fileLines) {
+        const fileMatch = line.match(/\d+\.\s+([^\s]+)\s+\(([^)]+)\)/);
+        if (fileMatch) {
+          const filePath = fileMatch[1];
+          const displayName = fileMatch[2];
+          const fileName = path.basename(filePath.replace(/\\/g, '/'));
+          if (!attachments.some(a => a.filename === fileName)) {
+            attachments.push({ name: displayName, filename: fileName });
+          }
+        }
+      }
+      displayContent = data.content.replace(embedRegex, '').trim();
+    }
+  }
+
+  if (!displayContent.trim() && !attachments.length) return null;
   return {
     id: event.id, messageId: data.messageId, role: event.type === 'user.message' ? 'user' : 'assistant',
-    content: data.content, timestamp: event.timestamp,
+    content: displayContent, timestamp: event.timestamp,
     source: data.isAutopilotContinuation ? '自动续行' : data.source ? '自动化/代理消息' : null,
     phase: data.phase ?? null, attachments
   };
+}
+
+function formatDuration(ms) {
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  const sec = ms / 1000;
+  if (sec < 60) return `${sec < 10 ? sec.toFixed(1) : Math.round(sec)}s`;
+  const m = Math.floor(sec / 60);
+  const s = Math.round(sec % 60);
+  return `${m}m ${s}s`;
+}
+
+function safeFilename(rawPath) {
+  if (typeof rawPath !== 'string') return '';
+  const clean = rawPath.replace(/\\/g, '/');
+  return path.basename(clean).slice(0, 100);
+}
+
+function fileIcon(filename) {
+  const ext = path.extname(filename).toLowerCase();
+  if (ext === '.py') return '🐍';
+  if (['.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx'].includes(ext)) return '📜';
+  if (['.html', '.htm', '.css', '.vue', '.svelte'].includes(ext)) return '🌐';
+  if (['.sh', '.bat', '.cmd', '.ps1'].includes(ext)) return '⚡';
+  if (['.json', '.yml', '.yaml', '.toml', '.md', '.txt'].includes(ext)) return '📄';
+  return '📄';
+}
+
+function parseToolInfo(data) {
+  const name = typeof data.toolName === 'string' ? data.toolName : '';
+  const args = data.arguments;
+
+  if (typeof args === 'string') {
+    const patchMatch = args.match(/(?:Update|Add|Delete) File:\s*([^\r\n]+)/);
+    if (patchMatch) {
+      const file = safeFilename(patchMatch[1].trim());
+      const icon = fileIcon(file) === '📄' ? '✏️' : fileIcon(file);
+      return { icon, title: `Patch ${file}` };
+    }
+    return { icon: '✏️', title: 'Apply patch' };
+  }
+
+  const obj = args && typeof args === 'object' ? args : {};
+  if (name === 'view') {
+    const file = safeFilename(obj.path || obj.file);
+    return { icon: file ? fileIcon(file) : '📄', title: file ? `View ${file}` : 'View file' };
+  }
+  if (name === 'edit') {
+    const file = safeFilename(obj.path || obj.file);
+    return { icon: file ? (fileIcon(file) === '📄' ? '✏️' : fileIcon(file)) : '✏️', title: file ? `Edit ${file}` : 'Edit file' };
+  }
+  if (name === 'apply_patch') {
+    const file = safeFilename(obj.path || obj.file);
+    return { icon: file ? (fileIcon(file) === '📄' ? '✏️' : fileIcon(file)) : '✏️', title: file ? `Patch ${file}` : 'Apply patch' };
+  }
+  if (['powershell', 'bash', 'cmd', 'shell'].includes(name)) {
+    if (typeof obj.description === 'string' && obj.description.trim()) {
+      return { icon: '⚡', title: `Run: ${obj.description.trim().slice(0, 50)}` };
+    }
+    if (typeof obj.command === 'string' && obj.command.trim()) {
+      const clean = obj.command.replace(/^\$env:\w+=[^;]+;\s*/, '').trim();
+      const firstLine = clean.split('\n')[0].trim().slice(0, 40);
+      return { icon: '⚡', title: `Run: ${firstLine || 'command'}` };
+    }
+    return { icon: '⚡', title: 'Running command' };
+  }
+  if (['rg', 'grep'].includes(name)) {
+    const pattern = typeof obj.pattern === 'string' ? obj.pattern.trim() : '';
+    return { icon: '🔍', title: pattern ? `Search: ${pattern.slice(0, 40)}` : 'Search files' };
+  }
+  if (name === 'glob') {
+    const pattern = typeof obj.pattern === 'string' ? obj.pattern.trim() : '';
+    return { icon: '📁', title: pattern ? `Find: ${pattern.slice(0, 40)}` : 'Find files' };
+  }
+  if (name === 'read_powershell') {
+    return { icon: '⚡', title: 'Read command output' };
+  }
+  if (name === 'create') {
+    const file = safeFilename(obj.path || obj.file);
+    return { icon: '➕', title: file ? `Create ${file}` : 'Create file' };
+  }
+  if (name === 'task') {
+    const desc = typeof obj.description === 'string' ? obj.description.trim() : '';
+    return { icon: '🤖', title: desc ? `Agent: ${desc.slice(0, 50)}` : 'Task agent' };
+  }
+  return {
+    icon: '⚙️',
+    title: (typeof data.toolTitle === 'string' && data.toolTitle.trim()) ? data.toolTitle.trim() : (name || 'Tool')
+  };
+}
+
+const gitCache = new Map();
+function getGitChanges(cwd) {
+  if (!cwd) return Promise.resolve(null);
+  const now = Date.now();
+  const cached = gitCache.get(cwd);
+  if (cached && now - cached.time < 3000) return Promise.resolve(cached.value);
+  return new Promise(resolve => {
+    execFile('git', ['--no-pager', 'diff', '--shortstat'], { cwd, timeout: 1500 }, (err, stdout) => {
+      if (err || !stdout) {
+        gitCache.set(cwd, { time: now, value: null });
+        return resolve(null);
+      }
+      const ins = stdout.match(/(\d+)\s+insertions?\(\+\)/)?.[1] ?? '0';
+      const del = stdout.match(/(\d+)\s+deletions?\(-\)/)?.[1] ?? '0';
+      const value = (ins !== '0' || del !== '0') ? `+${ins} -${del}` : null;
+      gitCache.set(cwd, { time: now, value });
+      resolve(value);
+    });
+  });
+}
+
+async function countArtifacts(filesDir) {
+  try {
+    const entries = await readdir(filesDir, { withFileTypes: true });
+    return entries.filter(e => !e.name.startsWith('.')).length;
+  } catch {
+    return 0;
+  }
+}
+
+export function checkSessionBusy(root, sessionId) {
+  if (!uuid.test(sessionId ?? '')) return false;
+  try {
+    const eventsPath = path.join(root, sessionId, 'events.jsonl');
+    const stat = statSync(eventsPath);
+    if (!stat.isFile()) return false;
+    // If not modified in 2 minutes, the session is not actively busy
+    if (Date.now() - stat.mtimeMs > 120000) return false;
+    const fd = openSync(eventsPath, 'r');
+    const len = Math.min(stat.size, 16384);
+    const buf = Buffer.alloc(len);
+    readSync(fd, buf, 0, len, stat.size - len);
+    closeSync(fd);
+    const lines = buf.toString('utf8').trim().split('\n');
+    for (let i = lines.length - 1; i >= 0; i--) {
+      try {
+        const ev = JSON.parse(lines[i]);
+        if (ev.type === 'session.shutdown' || ev.type === 'session.suspend' || ev.type === 'assistant.turn_end') return false;
+        if (ev.type === 'assistant.turn_start' || ev.type === 'tool.execution_start') return true;
+      } catch {}
+    }
+    return false;
+  } catch {
+    return false;
+  }
 }
 
 export function createHistoryReader({ root, targets, pageSize = 40 }) {
@@ -78,7 +254,7 @@ export function createHistoryReader({ root, targets, pageSize = 40 }) {
         throw changed();
       }
       if (!state) {
-        state = { generation: randomUUID(), ino: stat.ino, dev: stat.dev, end: 0, offset: 0, messages: [], completions: new Map(), textBytes: 0, ids: new Set(), prefix, prefixSize, tailSize: 0, tail: digest(Buffer.alloc(0)), validated: false };
+        state = { generation: randomUUID(), ino: stat.ino, dev: stat.dev, end: 0, offset: 0, messages: [], tools: new Map(), runningTools: new Set(), activeTurn: null, completions: new Map(), textBytes: 0, ids: new Set(), prefix, prefixSize, tailSize: 0, tail: digest(Buffer.alloc(0)), validated: false };
         if (cache.size >= 32) cache.delete(cache.keys().next().value);
       }
       if (state.cwd && path.resolve(target.path).toLowerCase() !== state.cwd) throw unavailable('App 目录与已验证的历史映射不一致。');
@@ -122,7 +298,35 @@ export function createHistoryReader({ root, targets, pageSize = 40 }) {
             state.cwd = path.resolve(target.path).toLowerCase();
           }
           let message = visibleMessage(event);
-          if (event.type === 'assistant.message') {
+          if (event.type === 'assistant.turn_start') {
+            state.activeTurn = { turnId: event.data?.turnId, startedAt: event.timestamp };
+          } else if (event.type === 'assistant.turn_end') {
+            state.activeTurn = null;
+            for (const callId of state.runningTools) {
+              const t = state.tools.get(callId);
+              if (t && t.status === 'running') t.status = 'completed';
+            }
+            state.runningTools.clear();
+          } else if (event.type === 'tool.execution_start') {
+            const toolCallId = event.data?.toolCallId;
+            const toolName = event.data?.toolName;
+            if (typeof toolCallId === 'string' && toolName !== 'task_complete' && !state.completions.has(toolCallId)) {
+              const info = parseToolInfo(event.data);
+              const toolMsg = {
+                id: event.id, messageId: `tool:${toolCallId}`, role: 'tool',
+                toolCallId, toolName: event.data.toolName, content: info.title, title: info.title, icon: info.icon,
+                status: 'running', startedAt: event.timestamp, completedAt: null, durationText: null,
+                timestamp: event.timestamp
+              };
+              state.tools.set(toolCallId, toolMsg);
+              state.runningTools.add(toolCallId);
+              if (!state.ids.has(toolMsg.messageId)) {
+                state.ids.add(toolMsg.messageId);
+                state.messages.push(toolMsg);
+                state.textBytes += Buffer.byteLength(info.title, 'utf8');
+              }
+            }
+          } else if (event.type === 'assistant.message') {
             if (event.data.toolRequests !== undefined && !Array.isArray(event.data.toolRequests)) throw invalid('未知助手工具请求结构。');
             for (const request of event.data.toolRequests ?? []) {
               if (request.name?.replace(/^functions\./, '') !== 'task_complete') continue;
@@ -131,14 +335,24 @@ export function createHistoryReader({ root, targets, pageSize = 40 }) {
                 summary: request.arguments.summary, messageId: `${event.data.messageId}:completion:${request.toolCallId}`
               });
             }
-          } else if (event.type === 'tool.execution_complete' && state.completions.has(event.data.toolCallId)) {
-            const completion = state.completions.get(event.data.toolCallId);
-            state.completions.delete(event.data.toolCallId);
-            if (typeof event.data.success !== 'boolean') throw invalid('未知完成摘要执行结果。');
-            if (event.data.success && completion.summary.trim()) message = {
-              id: event.id, messageId: completion.messageId, role: 'assistant', content: completion.summary,
-              timestamp: event.timestamp, source: '完成摘要', phase: 'final_answer', attachments: []
-            };
+          } else if (event.type === 'tool.execution_complete') {
+            if (state.completions.has(event.data.toolCallId)) {
+              const completion = state.completions.get(event.data.toolCallId);
+              state.completions.delete(event.data.toolCallId);
+              if (typeof event.data.success !== 'boolean') throw invalid('未知完成摘要执行结果。');
+              if (event.data.success && completion.summary.trim()) message = {
+                id: event.id, messageId: completion.messageId, role: 'assistant', content: completion.summary,
+                timestamp: event.timestamp, source: '完成摘要', phase: 'final_answer', attachments: []
+              };
+            } else if (typeof event.data.toolCallId === 'string' && state.tools.has(event.data.toolCallId)) {
+              const tool = state.tools.get(event.data.toolCallId);
+              state.runningTools.delete(event.data.toolCallId);
+              tool.status = event.data.success ? 'completed' : 'failed';
+              tool.completedAt = event.timestamp;
+              const ms = Math.max(0, Date.parse(event.timestamp) - Date.parse(tool.startedAt));
+              tool.duration = ms / 1000;
+              tool.durationText = formatDuration(ms);
+            }
           }
           if (message) {
             if (state.ids.has(message.messageId)) throw invalid('历史包含重复消息 ID。');
@@ -165,8 +379,35 @@ export function createHistoryReader({ root, targets, pageSize = 40 }) {
           digest(await readAt(file, 0, prefixSize)) !== prefix) throw changed();
       cache.set(request.id, state);
       const finish = before ?? (after !== null ? Math.min(state.messages.length, after + pageSize) : state.messages.length);
-      const start = after ?? Math.max(0, finish - pageSize);
+      let start = after ?? Math.max(0, finish - pageSize);
+      if (after !== null) {
+        let lookback = after;
+        while (lookback > 0 && state.messages[lookback - 1]?.role === 'tool') {
+          lookback--;
+          if (after - lookback >= 10) break;
+        }
+        start = lookback;
+      }
+      const isBusy = Boolean(state.activeTurn) || state.runningTools.size > 0;
+      const busyForSeconds = state.activeTurn
+        ? Math.max(0, Math.round((Date.now() - Date.parse(state.activeTurn.startedAt)) / 1000))
+        : 0;
+      let activeTool = null;
+      if (state.runningTools.size > 0) {
+        const lastCallId = Array.from(state.runningTools).pop();
+        const t = state.tools.get(lastCallId);
+        if (t) activeTool = { name: t.toolName, title: t.title, icon: t.icon, startedAt: t.startedAt };
+      }
+      const gitChanges = await getGitChanges(target.path);
+      const artifactsCount = await countArtifacts(path.join(root, request.id, 'files'));
       return { id: request.id, messages: state.messages.slice(start, finish),
+        progress: {
+          status: isBusy ? 'busy' : 'idle',
+          busyForSeconds,
+          activeTool,
+          changes: gitChanges,
+          artifacts: artifactsCount
+        },
         before: start ? `${state.generation}:${start}` : null,
         after: `${state.generation}:${finish}`, hasMoreNew: finish < state.messages.length,
         snapshotBytes: end, committedBytes: committed, incompleteTail: end > committed,

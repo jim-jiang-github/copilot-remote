@@ -41,15 +41,23 @@
     </aside>
     <button id="backdrop" class="backdrop" hidden aria-label="关闭会话列表"></button>
     <main class="chat">
-      <header class="chat-header"><button id="open-sidebar" class="icon mobile-only" aria-label="打开会话列表">☰</button><div><strong id="title">选择一个会话</strong></div><small id="subtitle">网页选中不会切换 PC 页面</small></header>
+      <header class="chat-header"><button id="open-sidebar" class="icon mobile-only" aria-label="打开会话列表">☰</button><div><strong id="title">选择一个会话</strong></div><small id="subtitle">网页选中不会切换 PC 页面</small><div id="session-stats" class="session-stats" hidden></div></header>
       <div class="notice">后台助手中转 · 选择仅改变网页目标，不切换电脑页面。中转消耗模型额度，通常需要数十秒。</div>
       <div id="status" class="status" role="status" aria-live="polite">正在读取桌面…</div>
       <div class="history-controls"><button id="older-history" type="button" hidden>加载更早记录</button><span id="history-status" role="status">选中后读取本机历史；不含未落盘流式文本。</span><button id="reload-history" type="button" hidden>重新加载历史</button></div>
       <div id="conversation" class="conversation"></div>
       <form id="composer" class="composer">
+        <div id="image-previews" class="image-previews" hidden></div>
         <label class="sr-only" for="message">发送到选中的 Copilot 会话</label>
         <textarea id="message" rows="5" maxlength="8000" placeholder="先选择一个会话…" disabled></textarea>
-        <div class="composer-bottom"><span class="composer-mode">后台中转</span><span id="target-label">尚未选择</span><span id="counter">0 / 8000</span><button id="send" class="send" type="submit" aria-label="发送消息" disabled>↑</button></div>
+        <div class="composer-bottom">
+          <button id="attach-image-btn" class="icon-attach" type="button" aria-label="上传图片" title="上传图片" disabled>📷</button>
+          <input id="image-input" type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden>
+          <span class="composer-mode">后台中转</span>
+          <span id="target-label">尚未选择</span>
+          <span id="counter">0 / 8000</span>
+          <button id="send" class="send" type="submit" aria-label="发送消息" disabled>↑</button>
+        </div>
       </form>
       <footer class="chat-footer">App 接受投递可能仍需排队 · 不代表目标已处理或任务执行成功</footer>
     </main>

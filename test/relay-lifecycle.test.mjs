@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -157,3 +157,177 @@ test('production config registers no development tool or fixed-target HTTP entry
   t.after(async () => { await close(); await rm(dir, { recursive: true }); });
   assert.deepEqual(registered.map(tool => tool.name), ['remote_relay_start']);
 });
+
+test('missing local config exposes one-time binding and stores the current runtime ID', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'relay-binding-'));
+  const configPath = join(dir, '.local', 'relay-probe-config.json');
+  const runtimeId = randomUUID();
+  let tools;
+  await startRelay(async config => {
+    tools = config.tools;
+    return {};
+  }, { configUrl: configPath, runtimeId });
+  t.after(() => rm(dir, { recursive: true }));
+
+  assert.deepEqual(tools.map(tool => tool.name), ['remote_relay_bind']);
+  await tools[0].handler({ appId: targetId });
+  assert.deepEqual(JSON.parse(await readFile(configPath, 'utf8')), { appId: targetId, runtimeId });
+});
+
+test('bound extension starts the loopback controller automatically on reload', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'relay-autostart-'));
+  const configPath = join(dir, 'relay-probe-config.json');
+  const runtimeId = randomUUID();
+  await writeFile(configPath, JSON.stringify({ appId: 'coordinator', runtimeId }));
+  let server;
+  let close;
+  let tools;
+  const account = localAccount(join(dir, 'account.json'));
+  await startRelay(async config => {
+    tools = config.tools;
+    return { on() {} };
+  }, {
+    configUrl: configPath, runtimeId, account, ledgerUrl: join(dir, 'ledger.json'), port: 0,
+    onServer: value => { server = value; }, onClose: value => { close = value; }
+  });
+  t.after(async () => {
+    await close();
+    server?.closeAllConnections();
+    await rm(dir, { recursive: true });
+  });
+
+  assert.equal(server.listening, true);
+  assert.deepEqual(tools.map(tool => tool.name), ['remote_relay_start']);
+});
+
+test('direct RPC target refresh updates sessions with zero prompt tokens', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'relay-direct-rpc-'));
+  let tools, server, close;
+  let sendPromptCalled = false;
+  const executedCalls = [];
+
+  const session = {
+    on() {},
+    send() {
+      sendPromptCalled = true;
+      throw new Error('session.send should not be called when direct RPC is available');
+    },
+    rpc: {
+      tools: {
+        execute: async ({ name, arguments: args }) => {
+          executedCalls.push({ name, args });
+          if (name === 'list_sessions_and_chats') {
+            return {
+              resultType: 'success',
+              textResultForLlm: JSON.stringify([{ id: targetId, title: 'Direct RPC Chat', type: 'chat' }])
+            };
+          }
+          throw new Error(`Unexpected tool: ${name}`);
+        }
+      }
+    }
+  };
+
+  const account = localAccount(join(dir, 'account.json'));
+  await account.setup('direct-test', randomUUID());
+  await startRelay(async config => { tools = config.tools; return session; }, {
+    config: { runtimeId: process.env.SESSION_ID, appId: 'coordinator', targetId, verificationEnabled: true },
+    ledgerUrl: join(dir, 'ledger.json'), account, port: 0,
+    onServer: value => { server = value; }, onClose: value => { close = value; }
+  });
+  t.after(async () => { await close(); server?.closeAllConnections(); await rm(dir, { recursive: true }); });
+
+  const invoke = (name, args = {}) => tools.find(tool => tool.name === name).handler(args);
+  await invoke('remote_relay_start');
+
+  // Initial snapshot should automatically populate sessions via direct RPC without explicit targets action
+  const snapshotResult = JSON.parse(await invoke('remote_relay_verify', { action: 'status' }));
+  assert.equal(sendPromptCalled, false, 'Model prompt must not be invoked');
+  assert.equal(snapshotResult.sessions.length, 1);
+  assert.equal(snapshotResult.sessions[0].id, targetId);
+  assert.equal(snapshotResult.sessions[0].title, 'Direct RPC Chat');
+
+  const targetsResult = JSON.parse(await invoke('remote_relay_verify', { action: 'targets' }));
+  assert.equal(sendPromptCalled, false, 'Model prompt must not be invoked');
+  assert.equal(targetsResult.refreshing, false);
+  assert.equal(targetsResult.sessions.length, 1);
+  assert.equal(targetsResult.sessions[0].id, targetId);
+  assert.equal(targetsResult.sessions[0].title, 'Direct RPC Chat');
+  assert.deepEqual(executedCalls, [
+    { name: 'list_sessions_and_chats', args: {} },
+    { name: 'list_sessions_and_chats', args: {} }
+  ]);
+});
+
+test('direct RPC message send delivers directly with zero prompt tokens', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'relay-direct-send-'));
+  let tools, server, close;
+  let sendPromptCalled = false;
+  const executedCalls = [];
+
+  const session = {
+    on() {},
+    send() {
+      sendPromptCalled = true;
+      throw new Error('session.send should not be called when direct RPC is available');
+    },
+    rpc: {
+      tools: {
+        execute: async ({ name, arguments: args }) => {
+          executedCalls.push({ name, args });
+          if (name === 'list_sessions_and_chats') {
+            return {
+              resultType: 'success',
+              textResultForLlm: JSON.stringify([{ id: targetId, title: 'Direct Send Chat', type: 'chat' }])
+            };
+          }
+          if (name === 'get_session') {
+            return {
+              resultType: 'success',
+              textResultForLlm: JSON.stringify({ id: targetId, archived_at: null, archived: false })
+            };
+          }
+          if (name === 'send_session_message') {
+            return {
+              resultType: 'success',
+              textResultForLlm: "Message accepted for priority delivery to chat 'Direct Send Chat'."
+            };
+          }
+          throw new Error(`Unexpected tool: ${name}`);
+        }
+      }
+    }
+  };
+
+  const account = localAccount(join(dir, 'account.json'));
+  await account.setup('direct-test', randomUUID());
+  await startRelay(async config => { tools = config.tools; return session; }, {
+    config: { runtimeId: process.env.SESSION_ID, appId: 'coordinator', targetId, verificationEnabled: true },
+    ledgerUrl: join(dir, 'ledger.json'), account, port: 0,
+    onServer: value => { server = value; }, onClose: value => { close = value; }
+  });
+  t.after(async () => { await close(); server?.closeAllConnections(); await rm(dir, { recursive: true }); });
+
+  const invoke = (name, args = {}) => tools.find(tool => tool.name === name).handler(args);
+  await invoke('remote_relay_start');
+  await invoke('remote_relay_verify', { action: 'targets' });
+
+  const testId = randomUUID();
+  const sendResult = JSON.parse(await invoke('remote_relay_verify', { action: 'question', requestId: testId }));
+
+  assert.equal(sendPromptCalled, false, 'No coordinator model turn used');
+  assert.equal(sendResult.submitted, true);
+  assert.equal(sendResult.status, 'app_accepted');
+
+  const snapshot = JSON.parse(await invoke('remote_relay_verify', { action: 'status' }));
+  const receipt = snapshot.receipts.find(item => item.requestId === testId);
+  assert.equal(receipt.status, 'app_accepted');
+  assert.equal(snapshot.activeRequestId, null);
+  assert.equal(executedCalls.length, 3);
+  assert.equal(executedCalls[0].name, 'list_sessions_and_chats');
+  assert.equal(executedCalls[1].name, 'get_session');
+  assert.equal(executedCalls[2].name, 'send_session_message');
+  assert.equal(executedCalls[2].args.session_id, targetId);
+  assert.match(executedCalls[2].args.message, /^我可以创建什么项目吗？\n/);
+});
+

@@ -142,3 +142,32 @@ test('enforces JSON request type and message byte limits', async t => {
   assert.equal((await app.call('/api/select', { id }, { 'Content-Type': 'text/plain' })).status, 415);
   assert.equal((await app.call('/api/send', { id, text: 'x'.repeat(41000), requestId })).status, 413);
 });
+test('image upload and retrieval requires authentication and validates file types', async t => {
+  const app = await fixture(t);
+  assert.equal((await app.call('/api/upload', { files: [] })).status, 401);
+  assert.equal((await app.call('/api/attachment?name=test.png')).status, 401);
+  await app.login();
+
+  // Test invalid upload
+  assert.equal((await app.call('/api/upload', { files: [] })).status, 400);
+  assert.equal((await app.call('/api/upload', { files: [{ name: 'test.exe', type: 'application/exe', data: 'AQID' }] })).status, 400);
+
+  // Test valid upload
+  const base64Png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+  const uploadRes = await app.call('/api/upload', {
+    files: [{ name: 'test.png', type: 'image/png', data: base64Png }]
+  });
+  assert.equal(uploadRes.status, 200);
+  const uploadData = await uploadRes.json();
+  assert.equal(uploadData.ok, true);
+  assert.equal(uploadData.files.length, 1);
+  assert.match(uploadData.files[0].filename, /^[0-9a-f-]{36}-test\.png$/);
+
+  // Test attachment retrieval
+  const attachRes = await app.call(`/api/attachment?name=${uploadData.files[0].filename}`);
+  assert.equal(attachRes.status, 200);
+  assert.equal(attachRes.headers.get('content-type'), 'image/png');
+
+  // Test invalid attachment name traversal
+  assert.equal((await app.call('/api/attachment?name=..%2Fsecret.txt')).status, 400);
+});

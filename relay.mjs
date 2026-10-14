@@ -1,9 +1,10 @@
-import { readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { request as httpRequest } from 'node:http';
 import { homedir } from 'node:os';
 import path from 'node:path';
-import { createHistoryReader } from './history.mjs';
+import { fileURLToPath } from 'node:url';
+import { createHistoryReader, checkSessionBusy } from './history.mjs';
 import { createController, AppError } from './server.mjs';
 import { localAccount } from './account.mjs';
 import { appendAudit, markStopped, applyAdmission, payloadReference, matchesForwardIntent, exactDispatchArgs, terminalStates } from './relay-state.mjs';
@@ -12,6 +13,7 @@ const local = new URL('./.local/', import.meta.url);
 const ledgerUrl = new URL('relay-ledger.json', local);
 const configUrl = new URL('relay-probe-config.json', local);
 const normalize = name => name.replace(/^functions\./, '');
+const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 export function isExactForward(input, active) {
   const args = input.toolArgs;
@@ -39,6 +41,36 @@ export function isExactCreate(input, active) {
     Object.entries(expected).every(([key, value]) => input.toolArgs[key] === value);
 }
 
+export function canExecuteDirect(session) {
+  return typeof session?.rpc?.tools?.execute === 'function' ||
+         typeof session?.connection?.sendRequest === 'function';
+}
+
+export function normalizeToolResult(result) {
+  if (typeof result === 'string') {
+    return {
+      resultType: 'success',
+      textResultForLlm: result,
+      sessionLog: result
+    };
+  }
+  return result ?? { resultType: 'failure', textResultForLlm: '', error: 'Tool returned empty result' };
+}
+
+export async function executeToolDirectly(session, name, args = {}) {
+  if (typeof session?.rpc?.tools?.execute === 'function') {
+    return await session.rpc.tools.execute({ name, arguments: args });
+  }
+  if (typeof session?.connection?.sendRequest === 'function') {
+    return await session.connection.sendRequest('session.tools.execute', {
+      sessionId: session.sessionId,
+      name,
+      arguments: args
+    });
+  }
+  throw new Error('Direct RPC tool execution not supported by session.');
+}
+
 export function parseAppTargets(text) {
   if (typeof text !== 'string') throw new Error('App enumeration did not contain text.');
   const start = text.indexOf('[');
@@ -61,8 +93,44 @@ export function parseAppTargets(text) {
 }
 
 export async function startRelay(joinSession, options = {}) {
-  const config = options.config ?? JSON.parse(await readFile(configUrl, 'utf8'));
-  if (process.env.SESSION_ID !== config.runtimeId) return joinSession({ tools: [] });
+  const configPath = options.configUrl ?? configUrl;
+  const configFile = configPath instanceof URL ? fileURLToPath(configPath) : configPath;
+  const runtimeId = options.runtimeId ?? process.env.SESSION_ID;
+  let config = options.config;
+  if (!config) {
+    try { config = JSON.parse(await readFile(configFile, 'utf8')); }
+    catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+      const bindSession = await joinSession({
+        tools: [{
+          name: 'remote_relay_bind',
+          description: 'One-time setup: bind this current Copilot App session as the relay coordinator. Use only the exact session ID obtained from list_sessions_and_chats for this current chat.',
+          parameters: {
+            type: 'object',
+            properties: { appId: { type: 'string', pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' } },
+            required: ['appId'],
+            additionalProperties: false
+          },
+          handler: async ({ appId }) => {
+            if (!uuid.test(runtimeId ?? '') || !uuid.test(appId ?? '')) {
+              throw new Error('Binding requires valid Copilot runtime and App session IDs.');
+            }
+            const boundConfig = { appId, runtimeId };
+            await mkdir(path.dirname(configFile), { recursive: true });
+            try {
+              await writeFile(configFile, JSON.stringify(boundConfig, null, 2), { flag: 'wx', mode: 0o600 });
+            } catch (writeError) {
+              if (writeError.code === 'EEXIST') throw new Error('Relay is already bound. Do not overwrite its session binding.');
+              throw writeError;
+            }
+            return 'This Copilot App session is bound. Run extensions_reload in this session; the relay will start automatically when the extension reloads.';
+          }
+        }]
+      });
+      return bindSession;
+    }
+  }
+  if (runtimeId !== config.runtimeId) return joinSession({ tools: [] });
   const account = options.account ?? localAccount(new URL('account.json', local));
   let verificationCredentials = null;
   const serviceAccount = config.verificationEnabled ? {
@@ -99,7 +167,8 @@ export async function startRelay(joinSession, options = {}) {
     return persistChain;
   };
   await persist();
-  const exact = input => matchesForwardIntent(input, active) && input.toolArgs.message === payloadReference(active.requestId);
+  const exact = input => matchesForwardIntent(input, active) &&
+    (input.toolArgs?.message === payloadReference(active.requestId) || input.toolArgs?.message === active?.text);
   function recordFor(context) { return context ? ledger.requests[context.requestId] : null; }
   function hookKey(input) {
     return `${normalize(input.toolName)}:${input.toolArgs?.session_id ?? input.toolArgs?.project_session_id ?? ''}`;
@@ -196,7 +265,28 @@ export async function startRelay(joinSession, options = {}) {
     if (!server) fail('RELAY_OFFLINE', 'Coordinator service is not enabled.');
     if (operation.action === 'history') return readHistory(operation);
     if (operation.action === 'snapshot') {
-      return { connected: true, sessions: targets, selected: null, transcript: [], desktopDraft: false,
+      if (targets.length === 0 && targetsAt === 0 && !active && canExecuteDirect(session)) {
+        try {
+          const listRaw = await executeToolDirectly(session, 'list_sessions_and_chats', {});
+          const listResult = normalizeToolResult(listRaw);
+          if (listResult.resultType === 'success') {
+            const rawText = listResult.textResultForLlm ?? listResult.sessionLog ?? '';
+            targets = parseAppTargets(rawText).map(item => ({
+              ...item, relayCoordinator: item.id === config.appId
+            }));
+            targetsAt = Date.now();
+            listError = null;
+          }
+        } catch (rpcError) {
+          console.warn('Initial direct RPC list_sessions_and_chats failed:', rpcError?.message ?? rpcError);
+        }
+      }
+      const sessionRoot = path.join(homedir(), '.copilot', 'session-state');
+      const sessions = targets.map(item => ({
+        ...item,
+        busy: checkSessionBusy(sessionRoot, item.id)
+      }));
+      return { connected: true, sessions, selected: null, transcript: [], desktopDraft: false,
         deliveries: Object.values(ledger.requests).filter(record => record.text).slice(-100).map(({ requestId, id, text, status, error, createdAt, acceptedAt }) => ({ requestId, id, text, status, error, createdAt, acceptedAt })),
         relay: true, targetsAt, listError, refreshing: active?.type === 'targets', activeRequestId: active?.requestId ?? null,
         receipts: Object.values(ledger.requests).map(({ requestId, id, status, error, appReceipt, createdId, type }) => ({ requestId, id, status, error, appReceipt, createdId, type })) };
@@ -225,6 +315,26 @@ export async function startRelay(joinSession, options = {}) {
       active = { type: 'targets', requestId: randomUUID() };
       contexts.set(active.requestId, active);
       listError = null;
+
+      if (canExecuteDirect(session)) {
+        try {
+          const listRaw = await executeToolDirectly(session, 'list_sessions_and_chats', {});
+          const listResult = normalizeToolResult(listRaw);
+          if (listResult.resultType === 'success') {
+            const rawText = listResult.textResultForLlm ?? listResult.sessionLog ?? '';
+            targets = parseAppTargets(rawText).map(item => ({
+              ...item, relayCoordinator: item.id === config.appId
+            }));
+            targetsAt = Date.now();
+            listError = null;
+            active = null;
+            return { refreshing: false, sessions: targets, relay: true };
+          }
+        } catch (rpcError) {
+          console.warn('Direct RPC list_sessions_and_chats failed, falling back to coordinator prompt:', rpcError?.message ?? rpcError);
+        }
+      }
+
       const context = active;
       const messageId = await session.send({ prompt: `[REMOTE_REQUEST ${context.requestId}] Call list_sessions_and_chats exactly once. The extension parses the real result. No other action. End.` });
       context.coordinatorMessageId = messageId;
@@ -239,6 +349,44 @@ export async function startRelay(joinSession, options = {}) {
       active = { ...record, invoked: false };
       contexts.set(record.requestId, active);
       await persist();
+
+      if (canExecuteDirect(session)) {
+        try {
+          const createRaw = await executeToolDirectly(session, 'create_session', creationArgs(operation));
+          const createResult = normalizeToolResult(createRaw);
+          const text = createResult.textResultForLlm ?? createResult.sessionLog ?? '';
+          const match = typeof text === 'string' ? text.match(/(?:session_id:\s*|"id"\s*:\s*")([0-9a-f-]{36})/) : null;
+          record.appReceipt = text;
+          if (createResult.resultType === 'success' && match) {
+            record.createdId = match[1];
+            const lookupRaw = await executeToolDirectly(session, 'get_session', { project_session_id: record.createdId });
+            const lookupResult = normalizeToolResult(lookupRaw);
+            const lookupText = lookupResult.textResultForLlm ?? lookupResult.sessionLog ?? '';
+            let metadata;
+            try { metadata = JSON.parse(lookupText); } catch { metadata = null; }
+            record.status = lookupResult.resultType === 'success' && metadata?.id === record.createdId ? 'app_created' : 'unknown';
+            if (record.status === 'app_created') {
+              const project = targets.find(item => item.projectId === record.projectId);
+              if (!targets.some(item => item.id === record.createdId)) targets.push({
+                id: record.createdId, title: metadata?.name ?? record.name, kind: record.projectId ? 'project' : 'chat',
+                projectId: record.projectId, projectName: project?.projectName ?? null, parentId: metadata?.parent_session_id ?? null,
+                description: project?.projectName ?? 'App 聊天'
+              });
+            } else {
+              record.error = '创建后的查询未确认会话，请检查 App。';
+            }
+          } else {
+            record.status = 'unknown';
+            record.error = 'App 创建工具未返回可验证的 ID；不要重建。';
+          }
+          active = null;
+          await persist();
+          return { submitted: true, requestId: record.requestId, status: record.status, relay: true };
+        } catch (rpcError) {
+          console.warn('Direct RPC create_session failed, falling back to coordinator prompt:', rpcError?.message ?? rpcError);
+        }
+      }
+
       try {
         const context = active;
         record.coordinatorMessageId = await session.send({ prompt: `[REMOTE_REQUEST ${record.requestId}] Call create_session once with only ${JSON.stringify(creationArgs(operation))}. No kickoff or navigation. Then get_session for the returned ID. Never retry. End.` });
@@ -256,14 +404,74 @@ export async function startRelay(joinSession, options = {}) {
     }
     if (operation.action !== 'send') fail('INVALID_OPERATION', 'Unsupported operation.');
     const target = targets.find(item => item.id === operation.id);
-    if (!target || operation.id === config.appId || Date.now() - targetsAt > 300000) fail('TARGET_UNAVAILABLE', 'Target list expired or target is unavailable. Refresh first.');
+    if (!target || Date.now() - targetsAt > 300000) fail('TARGET_UNAVAILABLE', 'Target list expired or target is unavailable. Refresh first.');
     if (Object.keys(ledger.requests).length >= 1000) fail('RECEIPT_LIMIT', 'Receipt limit reached. Inspect the stored ledger before maintenance.');
-    const record = { requestId: operation.requestId, id: operation.id, text: operation.text, status: 'submitting', createdAt: new Date().toISOString() };
+    let sendText = operation.text;
+    if (Array.isArray(operation.attachments) && operation.attachments.length) {
+      const attachLines = operation.attachments.map((a, i) => `${i + 1}. ${a.path} (${a.name})`).join('\n');
+      sendText = `[用户上传了 ${operation.attachments.length} 张图片附件]:\n${attachLines}` + (operation.text?.trim() ? `\n\n${operation.text.trim()}` : '');
+    }
+    const record = { requestId: operation.requestId, id: operation.id, text: sendText, status: 'submitting', createdAt: new Date().toISOString() };
     ledger.requests[operation.requestId] = record;
     active = { ...record, type: 'send', invoked: false, validated: false };
     contexts.set(record.requestId, active);
     appendAudit(record, 'submitted');
     await persist();
+
+    if (operation.id === config.appId) {
+      try {
+        appendAudit(record, 'current_session_send_started', { id: record.id });
+        record.coordinatorMessageId = await session.send({ prompt: sendText });
+        record.status = 'app_accepted';
+        record.appReceipt = 'Message accepted by current session';
+        appendAudit(record, 'current_session_send_admitted', { messageId: record.coordinatorMessageId });
+        active = null;
+        await persist();
+        return { submitted: true, requestId: record.requestId, status: record.status, relay: true };
+      } catch (err) {
+        record.status = 'failed';
+        record.error = err?.message || '发送至当前会话失败';
+        appendAudit(record, 'current_session_send_failed', { error: record.error });
+        active = null;
+        await persist();
+        return { submitted: true, requestId: record.requestId, status: record.status, relay: true };
+      }
+    }
+
+    if (canExecuteDirect(session)) {
+      try {
+        appendAudit(record, 'direct_rpc_lookup_started', { id: record.id });
+        const lookupRaw = await executeToolDirectly(session, 'get_session', { project_session_id: record.id });
+        const lookupResult = normalizeToolResult(lookupRaw);
+        let metadata;
+        try { metadata = JSON.parse(lookupResult.textResultForLlm ?? lookupResult.sessionLog ?? '{}'); } catch { metadata = null; }
+        const valid = lookupResult.resultType === 'success' && metadata?.id === record.id && !metadata.archived_at && !metadata.archived;
+        if (!valid) {
+          record.status = 'failed';
+          record.error = '目标查询未确认现有未归档 App 会话；尚未执行投递。';
+          appendAudit(record, 'target_verification_failed', { id: record.id });
+          active = null;
+          await persist();
+          return { submitted: true, requestId: record.requestId, status: record.status, relay: true };
+        }
+        active.validated = true;
+        appendAudit(record, 'target_verified', { id: record.id });
+        appendAudit(record, 'direct_rpc_send_started', { id: record.id });
+        const sendRaw = await executeToolDirectly(session, 'send_session_message', {
+          session_id: record.id,
+          message: sendText,
+          delivery_mode: 'immediate'
+        });
+        const sendResult = normalizeToolResult(sendRaw);
+        applyAdmission(record, sendResult);
+        active = null;
+        await persist();
+        return { submitted: true, requestId: record.requestId, status: record.status, relay: true };
+      } catch (rpcError) {
+        console.warn('Direct RPC send_session_message failed, falling back to coordinator prompt:', rpcError?.message ?? rpcError);
+      }
+    }
+
     try {
       const context = active;
       record.coordinatorMessageId = await session.send({ prompt: `[REMOTE_REQUEST ${record.requestId}] Fixed relay, not a conversation. 1. get_session({"project_session_id":"${record.id}"}). 2. send_session_message({"session_id":"${record.id}","message":"${payloadReference(record.requestId)}","delivery_mode":"immediate"}) exactly once. The extension replaces the payload reference with authorized original text; do not answer, interpret or edit the payload. No other tools, no retry. End after the send result.` });
@@ -280,21 +488,29 @@ export async function startRelay(joinSession, options = {}) {
       fail('DELIVERY_UNKNOWN', record.error);
     }
   }
+  async function startServer() {
+    if (server) return 'Controller already running.';
+    const origin = config.origin ?? 'http://127.0.0.1:8765';
+    server = createController({ account: serviceAccount, origin, bridge: submit });
+    try {
+      await new Promise((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(options.port ?? 8765, '127.0.0.1', resolve);
+      });
+    } catch (error) {
+      server = undefined;
+      throw error;
+    }
+    options.onServer?.(server);
+    return `Focus-free controller ready at ${origin}. Existing targets must be refreshed by the authenticated webpage. This uses model turns and App message admission, not desktop input. Development verification ${config.verificationEnabled ? 'enabled' : 'disabled; only remote_relay_start registered'}.`;
+  }
   session = await joinSession({
     tools: [
       {
         name: 'remote_relay_start',
         description: 'Start the authenticated focus-free Web controller only in its explicitly bound App coordinator. Does not navigate or simulate input.',
         parameters: { type: 'object', properties: {}, additionalProperties: false },
-        handler: async () => {
-          if (server) return 'Controller already running.';
-          const origin = config.origin ?? 'http://127.0.0.1:8765';
-          server = createController({ account: serviceAccount, origin, bridge: submit });
-          try { await new Promise((resolve, reject) => { server.once('error', reject); server.listen(options.port ?? 8765, '127.0.0.1', resolve); }); }
-          catch (error) { server = undefined; throw error; }
-          options.onServer?.(server);
-          return `Focus-free controller ready at ${origin}. Existing targets must be refreshed by the authenticated webpage. This uses model turns and App message admission, not desktop input. Development verification ${config.verificationEnabled ? 'enabled' : 'disabled; only remote_relay_start registered'}.`;
-        }
+        handler: startServer
       },
       ...(config.verificationEnabled ? [{
         name: 'remote_relay_verify',
@@ -385,7 +601,7 @@ export async function startRelay(joinSession, options = {}) {
         }
         if (active.type === 'create' && active.createdId && name === 'get_session' &&
             input.toolArgs?.project_session_id === active.createdId && Object.keys(input.toolArgs).length === 1) return allow(input, context);
-        if (exact(input) && !active.invoked && active.validated) {
+        if ((exact(input) || isExactForward(input, active)) && !active.invoked && active.validated) {
           active.invoked = true;
           record.status = 'invoking';
           record.dispatchAuthorized = true;
@@ -520,5 +736,6 @@ export async function startRelay(joinSession, options = {}) {
   const close = async () => { clearTimeout(stopTimer); clearInterval(watchdog); server?.close(); await persistChain; };
   process.once('SIGTERM', close);
   options.onClose?.(close);
+  if (options.autoStart ?? !options.config) await startServer();
   return session;
 }

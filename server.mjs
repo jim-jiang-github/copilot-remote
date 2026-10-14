@@ -1,7 +1,9 @@
 import http from 'node:http';
 import https from 'node:https';
-import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import { readFile, writeFile, mkdir, stat } from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
+import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
@@ -21,13 +23,13 @@ function equalSecret(a, b) {
   return first.length === second.length && timingSafeEqual(first, second);
 }
 
-async function readJson(req) {
+async function readJson(req, maxBytes = 40000) {
   if (req.headers['content-type'] !== 'application/json') throw new AppError(415, 'CONTENT_TYPE', 'Use application/json.');
   let length = 0;
   const parts = [];
   for await (const part of req) {
     length += part.length;
-    if (length > 40000) throw new AppError(413, 'TOO_LARGE', 'Request is too large.');
+    if (length > maxBytes) throw new AppError(413, 'TOO_LARGE', 'Request is too large.');
     parts.push(part);
   }
   try { return JSON.parse(Buffer.concat(parts).toString('utf8')); }
@@ -48,7 +50,7 @@ export function createController({ password, username = 'local', account, origin
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'no-referrer');
     res.setHeader('X-Frame-Options', 'DENY');
-    res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
+    res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data: blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
     const json = (status, data) => { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(data)); };
     try {
       if (req.headers.host !== expected.host) throw new AppError(403, 'HOST_DENIED', 'Host is not configured for this controller.');
@@ -106,6 +108,77 @@ export function createController({ password, username = 'local', account, origin
       }
       let operation;
       let requestId;
+      if (route === '/api/attachment' && req.method === 'GET') {
+        const name = url.searchParams.get('name');
+        const sessionId = url.searchParams.get('session');
+        if (!name || !/^[0-9a-zA-Z._-]+$/.test(name) || name.includes('..')) {
+          throw new AppError(400, 'INVALID_ATTACHMENT', 'Invalid attachment name.');
+        }
+        let filePath = path.join(homedir(), '.copilot', 'attachments', name);
+        let exists = false;
+        try {
+          const st = await stat(filePath);
+          if (st.isFile()) exists = true;
+        } catch {}
+        if (!exists && sessionId && uuid.test(sessionId)) {
+          filePath = path.join(homedir(), '.copilot', 'workspaces', sessionId, 'attachments', name);
+          try {
+            const st = await stat(filePath);
+            if (st.isFile()) exists = true;
+          } catch {}
+        }
+        if (!exists) throw new AppError(404, 'NOT_FOUND', 'Attachment not found.');
+        const ext = path.extname(name).toLowerCase();
+        const mimeTypes = {
+          '.png': 'image/png',
+          '.jpg': 'image/jpeg',
+          '.jpeg': 'image/jpeg',
+          '.gif': 'image/gif',
+          '.webp': 'image/webp',
+          '.svg': 'image/svg+xml'
+        };
+        const contentType = mimeTypes[ext] || 'application/octet-stream';
+        res.writeHead(200, {
+          'Content-Type': contentType,
+          'Cache-Control': 'private, max-age=86400'
+        });
+        const stream = createReadStream(filePath);
+        return stream.pipe(res);
+      }
+      if (route === '/api/upload' && req.method === 'POST') {
+        const data = await readJson(req, 50 * 1024 * 1024);
+        const files = data?.files;
+        if (!Array.isArray(files) || !files.length || files.length > 20) {
+          throw new AppError(400, 'INVALID_UPLOAD', 'Upload 1-20 files.');
+        }
+        const attachDir = path.join(homedir(), '.copilot', 'attachments');
+        await mkdir(attachDir, { recursive: true });
+        const saved = [];
+        for (const file of files) {
+          if (!file || typeof file.data !== 'string' || typeof file.name !== 'string') {
+            throw new AppError(400, 'INVALID_FILE', 'Invalid file data.');
+          }
+          const baseName = path.basename(file.name).replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 100);
+          const ext = path.extname(baseName).toLowerCase() || '.png';
+          if (!['.png', '.jpg', '.jpeg', '.gif', '.webp'].includes(ext)) {
+            throw new AppError(400, 'UNSUPPORTED_TYPE', 'Only image files are supported.');
+          }
+          const buffer = Buffer.from(file.data, 'base64');
+          if (buffer.length > 15 * 1024 * 1024) {
+            throw new AppError(413, 'FILE_TOO_LARGE', 'Individual file cannot exceed 15MB.');
+          }
+          const uniqueName = `${randomUUID()}-${baseName}`;
+          const targetPath = path.join(attachDir, uniqueName);
+          await writeFile(targetPath, buffer);
+          saved.push({
+            name: baseName,
+            filename: uniqueName,
+            path: targetPath,
+            size: buffer.length
+          });
+        }
+        return json(200, { ok: true, files: saved });
+      }
       if (route === '/api/history' && req.method === 'POST') {
         const data = await readJson(req);
         if (!uuid.test(data?.id ?? '') || Object.keys(data).some(key => !['id', 'before', 'after'].includes(key))) throw new AppError(400, 'INVALID_HISTORY', 'Invalid history request.');
@@ -118,9 +191,29 @@ export function createController({ password, username = 'local', account, origin
         if (!uuid.test(data?.id ?? '')) throw new AppError(400, 'INVALID_TARGET', 'Invalid session ID.');
         operation = { action: route === '/api/send' ? 'send' : 'select', id: data.id };
         if (operation.action === 'send') {
-          if (typeof data.text !== 'string' || !data.text.trim() || data.text.length > 8000 || data.text.includes('\0')) throw new AppError(400, 'INVALID_TEXT', 'Enter 1-8000 characters without NUL.');
+          const hasAttachments = Array.isArray(data.attachments) && data.attachments.length > 0;
+          const text = typeof data.text === 'string' ? data.text : '';
+          if (!hasAttachments && (!text.trim() || text.length > 8000 || text.includes('\0'))) {
+            throw new AppError(400, 'INVALID_TEXT', 'Enter 1-8000 characters without NUL.');
+          }
+          if (hasAttachments && (text.length > 8000 || text.includes('\0'))) {
+            throw new AppError(400, 'INVALID_TEXT', 'Enter 0-8000 characters without NUL.');
+          }
           if (!uuid.test(data.requestId ?? '')) throw new AppError(400, 'INVALID_REQUEST_ID', 'A unique request ID is required.');
-          operation.text = data.text;
+          let attachments = [];
+          if (hasAttachments) {
+            for (const att of data.attachments) {
+              if (att && typeof att.filename === 'string' && /^[0-9a-zA-Z._-]+$/.test(att.filename)) {
+                attachments.push({
+                  name: typeof att.name === 'string' ? path.basename(att.name).slice(0, 100) : 'image.png',
+                  filename: att.filename,
+                  path: path.join(homedir(), '.copilot', 'attachments', att.filename)
+                });
+              }
+            }
+          }
+          operation.attachments = attachments;
+          operation.text = text;
           requestId = data.requestId;
           operation.requestId = requestId;
           const existing = requests.get(requestId);

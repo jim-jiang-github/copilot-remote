@@ -49,7 +49,16 @@ test('attachment-only messages remain visible with no local path disclosure', as
   const f = await fixture(t, start() + message('', 'user', { attachments: [{ displayName: 'picture.png', path: 'C:\\private\\picture.png' }] }));
   const result = await f.read({ id });
   assert.equal(result.messages.length, 1);
-  assert.deepEqual(result.messages[0].attachments, [{ name: 'picture.png' }]);
+  assert.deepEqual(result.messages[0].attachments, [{ name: 'picture.png', filename: 'picture.png' }]);
+  assert.ok(!JSON.stringify(result).includes('private'));
+});
+test('extracts user embedded upload attachments safely and strips raw local paths', async t => {
+  const embedded = '[用户上传了 1 张图片附件]:\n1. C:\\private\\path\\secret-id-photo.png (photo.png)\n\n请分析这张图片';
+  const f = await fixture(t, start() + message(embedded, 'user'));
+  const result = await f.read({ id });
+  assert.equal(result.messages.length, 1);
+  assert.equal(result.messages[0].content, '请分析这张图片');
+  assert.deepEqual(result.messages[0].attachments, [{ name: 'photo.png', filename: 'secret-id-photo.png' }]);
   assert.ok(!JSON.stringify(result).includes('private'));
 });
 test('incremental polling reads new pages and is bounded to the captured snapshot', async t => {
@@ -75,6 +84,43 @@ test('actual successful completion summary is a visible assistant reply, not a r
   assert.equal(done.messages[0].role, 'assistant');
   assert.equal(done.messages[0].source, '完成摘要');
   assert.ok(!JSON.stringify(done).includes('SECRET'));
+});
+test('tool execution progress parses safe titles, icons, durations and turn activity', async t => {
+  const toolCallId = 'call_' + randomUUID();
+  const f = await fixture(t, start() + message('用户指令') +
+    event('assistant.turn_start', { turnId: '0' }, '2026-10-13T10:00:00.000Z') +
+    event('tool.execution_start', {
+      toolCallId,
+      toolName: 'view',
+      toolTitle: 'Viewing file',
+      arguments: { path: 'C:\\Users\\alice\\repo\\pdd_video.py' }
+    }, '2026-10-13T10:00:01.000Z'));
+  const inFlight = await f.read({ id });
+  assert.equal(inFlight.messages.length, 2);
+  const toolItem = inFlight.messages[1];
+  assert.equal(toolItem.role, 'tool');
+  assert.equal(toolItem.icon, '🐍');
+  assert.equal(toolItem.title, 'View pdd_video.py');
+  assert.equal(toolItem.status, 'running');
+  assert.equal(inFlight.progress.status, 'busy');
+  assert.equal(inFlight.progress.activeTool.title, 'View pdd_video.py');
+  assert.ok(!JSON.stringify(inFlight).includes('alice'));
+
+  await appendFile(f.file, event('tool.execution_complete', {
+    toolCallId,
+    success: true,
+    result: { content: 'INTERNAL_SECRET_CODE' }
+  }, '2026-10-13T10:00:20.000Z') +
+    event('assistant.turn_end', { turnId: '0' }, '2026-10-13T10:00:20.500Z') +
+    message('任务已完成', 'assistant'));
+
+  const completed = await f.read({ id, after: inFlight.after });
+  const completedTool = completed.messages.find(m => m.toolCallId === toolCallId);
+  assert.ok(completedTool);
+  assert.equal(completedTool.status, 'completed');
+  assert.equal(completedTool.durationText, '19s');
+  assert.equal(completed.progress.status, 'idle');
+  assert.ok(!JSON.stringify(completed).includes('INTERNAL_SECRET_CODE'));
 });
 test('invalid UTF8/schema/version, unknown phase and mismatched identity fail explicitly', async t => {
   for (const text of [
