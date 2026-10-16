@@ -1,9 +1,27 @@
 import { createInterface } from 'node:readline/promises';
 import { resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
 import { DeviceTools } from './device-tools.mjs';
 import { lockDirectory } from './storage.mjs';
 import { Peer } from './wire.mjs';
+
+export async function reportStartupFailure(error, {
+  input = process.stdin, output = process.stderr,
+} = {}) {
+  output.write(`\nDevice startup failed: ${error.message}\n`);
+  output.write('Configure the device in PowerShell before launching it:\n'
+    + "$env:EXECUTOR_RELAY = 'wss://your-relay-host'\n"
+    + "$env:EXECUTOR_DEVICE_TOKEN = '<device-token>'\n"
+    + "$env:EXECUTOR_ROOT = 'C:\\work\\my-project'\n"
+    + '.\\device.exe\n'
+    + 'The workspace directory must exist. Use the device token provisioned on your relay.\n');
+  if (!input.isTTY) return;
+  const rl = createInterface({ input, output });
+  try {
+    await rl.question('\nPress Enter to close this window...');
+  } finally {
+    rl.close();
+  }
+}
 
 export async function terminalApproval(command, signal) {
   if (!process.stdin.isTTY) {
@@ -37,8 +55,10 @@ export function approvalFor(mode) {
   };
 }
 
-async function main() {
-  if (!process.env.EXECUTOR_ROOT) throw new Error('Set EXECUTOR_ROOT to the target workspace on B');
+export async function main() {
+  const missing = ['EXECUTOR_ROOT', 'EXECUTOR_RELAY', 'EXECUTOR_DEVICE_TOKEN']
+    .filter((name) => !process.env[name]);
+  if (missing.length) throw new Error(`Missing required configuration: ${missing.join(', ')}`);
   const approvalMode = process.env.EXECUTOR_APPROVAL || 'terminal';
   const approve = approvalFor(approvalMode);
   const directory = resolve(process.env.EXECUTOR_STATE || '.executor', 'device');
@@ -90,8 +110,4 @@ async function main() {
     await release();
     throw error;
   }
-}
-
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  main().catch((error) => { console.error(error.message); process.exitCode = 1; });
 }

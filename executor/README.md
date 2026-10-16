@@ -37,7 +37,8 @@ This is an intentionally restricted SDK session, **not full local feature parity
 
 ## Requirements and supported interface
 
-- Node.js **22.12+** on each node.
+- Node.js **22.12+** on A and on machines running from source; the standalone
+  Windows B executable includes its runtime and needs no Node.js installation.
 - Windows, Linux and macOS are implementation targets. The pinned SDK includes
   Windows/Linux/macOS x64/arm64 optional runtime packages (also Linux musl).
   Keep optional dependencies enabled on A.
@@ -87,17 +88,71 @@ dedicated service user. Never commit tokens or copy personal App account data.
 
 ## Install and start
 
-On each node, from this directory:
+For source-based setup, install dependencies from this directory on the nodes
+you run from source:
 
 ```console
 npm ci
 ```
+
+### Build a standalone Windows device app
+
+From the repository root, run this once on a Windows x64 build machine:
+
+```powershell
+.\executor\build-device.ps1
+```
+
+The script installs/upgrades Node.js LTS with `winget` if Node.js 22.12+ is not
+available, installs the locked npm dependencies, and builds
+`executor\dist\device.exe`. It may require approval for the Node.js installer.
+The build machine needs internet access. Copy `device.exe` to private PC B; B
+does not need Node.js, npm, or this repository. This packages only the device
+role, not A, the relay, or the operator.
+
+On B, open PowerShell in the directory where you want the device state stored
+and run the app with its configuration:
+
+```powershell
+$env:EXECUTOR_RELAY = 'wss://your-relay-host'
+$env:EXECUTOR_DEVICE_TOKEN = '<device-token>'
+$env:EXECUTOR_ROOT = 'C:\work\my-project'
+.\device.exe
+```
+
+Keep the terminal open. By default, each request requires local approval in
+that terminal. Optionally set `EXECUTOR_STATE` to a stable private directory
+and `EXECUTOR_EXECUTABLES` to a JSON array of explicitly allowed absolute
+executable paths. Do not place tokens in the executable or commit them.
+
+Double-clicking the executable does not set these environment variables.
+Set them in PowerShell and launch the executable from that same window.
+Startup failures display their cause and configuration instructions; in an
+interactive console the app waits for Enter before closing. Noninteractive
+launches still exit with a failure status without waiting for input.
 
 Examples below use placeholders for your separately provisioned tokens.
 The localhost URL is for a same-host smoke test only. In deployment use
 `wss://your-relay-host` on A, B and the operator. Non-loopback `ws://` is rejected.
 
 ### Public relay
+
+To build the standalone Windows x64 relay server, run from the repository root:
+
+```powershell
+.\executor\build-relay.ps1
+```
+
+Like the device build script, this installs/upgrades Node.js through `winget`
+when needed and installs the locked build dependencies. The output is
+`executor\dist\relay.exe`. Copy it to the Windows relay server; Node.js and npm
+are not required there. In PowerShell on that server, set the three different
+role tokens as shown below, then run `.\relay.exe` instead of `npm run relay`.
+Startup errors remain visible until Enter is pressed in an interactive console.
+
+This executable is a console server, not a native Windows service. The build
+script does not register a service or update/restart a deployed server. Public
+TLS reverse proxy and persistent process supervision are still required.
 
 PowerShell:
 

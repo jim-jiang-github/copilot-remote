@@ -98,7 +98,7 @@ export function createRelay({ secrets, host = '127.0.0.1', port = 8788 }) {
   };
 }
 
-async function main() {
+export async function main() {
   const relay = createRelay({
     secrets: {
       agent: process.env.EXECUTOR_AGENT_TOKEN,

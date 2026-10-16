@@ -6,7 +6,42 @@ import { DeviceTools, devicePath, runProcess } from '../device-tools.mjs';
 import { cleanupTemporary, temporary } from './helpers.mjs';
 import { lockDirectory, saveJson } from '../storage.mjs';
 import { createHash } from 'node:crypto';
-import { approvalFor } from '../device.mjs';
+import { PassThrough } from 'node:stream';
+import { approvalFor, reportStartupFailure } from '../device.mjs';
+
+test('interactive startup errors show configuration help and wait for Enter', async () => {
+  const input = new PassThrough();
+  input.isTTY = true;
+  const output = new PassThrough();
+  let text = '', finished = false;
+  output.on('data', (chunk) => { text += chunk; });
+  const reporting = reportStartupFailure(new Error('Missing required configuration'), { input, output })
+    .then(() => { finished = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(finished, false);
+  assert.match(text, /Device startup failed: Missing required configuration/);
+  assert.match(text, /EXECUTOR_ROOT/);
+  assert.match(text, /EXECUTOR_RELAY/);
+  assert.match(text, /EXECUTOR_DEVICE_TOKEN/);
+  assert.match(text, /Press Enter/);
+  input.write('\n');
+  await reporting;
+  assert.equal(finished, true);
+  input.destroy();
+  output.destroy();
+});
+
+test('noninteractive startup errors report their cause without blocking', async () => {
+  const input = new PassThrough();
+  const output = new PassThrough();
+  let text = '';
+  output.on('data', (chunk) => { text += chunk; });
+  await reportStartupFailure(new Error('State directory locked'), { input, output });
+  assert.match(text, /State directory locked/);
+  assert.doesNotMatch(text, /Press Enter/);
+  input.destroy();
+  output.destroy();
+});
 
 async function fixture(t, approve = async () => true) {
   const directory = await temporary(t);
